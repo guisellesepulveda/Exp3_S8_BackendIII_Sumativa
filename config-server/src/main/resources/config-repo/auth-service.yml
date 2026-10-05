@@ -1,0 +1,17 @@
+server:
+  port: 8081
+
+# Authorization Server (OAuth2 / OIDC). Los secretos de los clientes son de DEMOSTRACION:
+# en un entorno real se inyectan por variables de entorno o un secret manager.
+app:
+  oauth:
+    # Valor del claim "iss". Debe coincidir con la URL por la que los clientes alcanzan a auth-service.
+    issuer: http://localhost:8081
+    access-token-ttl-minutes: 60
+    clients:
+      admin:
+        secret: ${OAUTH_CLIENT_ADMIN_SECRET:admin-secret}
+      reader:
+        secret: ${OAUTH_CLIENT_READER_SECRET:reader-secret}
+      web:
+        secret: ${OAUTH_CLIENT_WEB_SECRET:web-secret}

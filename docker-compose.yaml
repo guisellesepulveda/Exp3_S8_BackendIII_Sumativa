@@ -1,0 +1,168 @@
+# Banco XYZ - orquestacion completa (infraestructura + microservicios).
+#
+#   docker compose up -d --build      # construye las imagenes y levanta todo en orden
+#   docker compose ps                 # estado y healthchecks
+#   docker compose down -v            # detiene y borra contenedores
+#
+# Solo la infraestructura (para correr los servicios con `java -jar` en el host):
+#   docker compose up -d kafka kafka-ui
+
+x-java-service: &java-service
+  restart: unless-stopped
+  networks: [banco-net]
+  healthcheck: &java-healthcheck
+    test: ["CMD-SHELL", "wget -qO- http://localhost:$$SERVER_PORT/actuator/health | grep -q '\"status\":\"UP\"'"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+    start_period: 40s
+
+# Variables comunes de los clientes del Config Server (perfil docker -> nombres de servicio en vez de localhost)
+x-config-client-env: &config-client-env
+  SPRING_PROFILES_ACTIVE: docker
+  CONFIG_SERVER_URL: http://config-server:8888
+
+services:
+  # ---------------- Mensajeria (Kafka en modo KRaft, sin Zookeeper) ----------------
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: banco-xyz-kafka
+    networks: [banco-net]
+    ports:
+      - "9092:9092"   # acceso desde el host (java -jar local, Kafka UI externo)
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # 29092 = red interna de docker (kafka:29092); 9092 = host (localhost:9092)
+      KAFKA_LISTENERS: PLAINTEXT://:29092,CONTROLLER://:9093,PLAINTEXT_HOST://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: banco-xyz-kafka-ui
+    networks: [banco-net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: banco-xyz
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+
+  # ---------------- Infraestructura Spring Cloud ----------------
+  config-server:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: config-server/Dockerfile
+    image: banco-xyz/config-server:1.0.0
+    container_name: banco-xyz-config-server
+    ports:
+      - "8888:8888"
+    environment:
+      SERVER_PORT: 8888
+
+  discovery-server:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: discovery-server/Dockerfile
+    image: banco-xyz/discovery-server:1.0.0
+    container_name: banco-xyz-discovery-server
+    ports:
+      - "8761:8761"
+    environment:
+      SERVER_PORT: 8761
+
+  # ---------------- Seguridad: Authorization Server OAuth2 ----------------
+  auth-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: auth-service/Dockerfile
+    image: banco-xyz/auth-service:1.0.0
+    container_name: banco-xyz-auth-service
+    depends_on:
+      config-server:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      <<: *config-client-env
+      SERVER_PORT: 8081
+      # Secretos de los clientes OAuth2 (valores de demostracion; ver config-repo/auth-service.yml)
+      OAUTH_CLIENT_ADMIN_SECRET: admin-secret
+      OAUTH_CLIENT_READER_SECRET: reader-secret
+      OAUTH_CLIENT_WEB_SECRET: web-secret
+
+  # ---------------- Microservicios de negocio (Resource Servers) ----------------
+  transacciones-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: transacciones-service/Dockerfile
+    image: banco-xyz/transacciones-service:1.0.0
+    container_name: banco-xyz-transacciones-service
+    depends_on: &business-deps
+      config-server:
+        condition: service_healthy
+      discovery-server:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      auth-service:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
+    environment:
+      <<: *config-client-env
+      SERVER_PORT: 8082
+
+  intereses-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: intereses-service/Dockerfile
+    image: banco-xyz/intereses-service:1.0.0
+    container_name: banco-xyz-intereses-service
+    depends_on: *business-deps
+    ports:
+      - "8083:8083"
+    environment:
+      <<: *config-client-env
+      SERVER_PORT: 8083
+
+  cuentas-service:
+    <<: *java-service
+    build:
+      context: .
+      dockerfile: cuentas-service/Dockerfile
+    image: banco-xyz/cuentas-service:1.0.0
+    container_name: banco-xyz-cuentas-service
+    depends_on: *business-deps
+    ports:
+      - "8084:8084"
+    environment:
+      <<: *config-client-env
+      SERVER_PORT: 8084
+
+networks:
+  banco-net:
+    name: banco-xyz-net

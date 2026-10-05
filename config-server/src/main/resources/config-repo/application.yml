@@ -1,0 +1,53 @@
+# Configuracion compartida por TODOS los microservicios clientes del Config Server.
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:8761/eureka/
+    fetch-registry: true
+    register-with-eureka: true
+  instance:
+    prefer-ip-address: true
+
+# OAuth2: todos los microservicios de negocio son Resource Servers y validan la firma RS256 de los
+# access token con la clave publica (JWKS) publicada por auth-service. No hay secretos compartidos.
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: http://localhost:8081/oauth2/jwks
+
+  # Kafka: broker local (docker-compose.yaml). Eventos serializados como JSON.
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        enable.idempotence: true
+        # Timeouts cortos: si Kafka cae, el publicador falla rapido y el Circuit Breaker actua.
+        max.block.ms: 3000
+        request.timeout.ms: 2000
+        delivery.timeout.ms: 4000
+    consumer:
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.trusted.packages: com.bancoxyz.common.events
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,refresh,circuitbreakers
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
